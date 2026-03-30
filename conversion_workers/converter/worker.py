@@ -120,12 +120,18 @@ class Conversion:
         if not record:
             raise Exception("Job not found")
 
-        payload = {
-            "input_url": path,
-            "conversion_type": "convert_pdf_to_ppt"
-        }
+        suffix = Path(path).suffix.lower()
 
-        record = self._update_record(record, **payload)
+        if suffix != ".pdf":
+            self._update_status(record, JobStatus.failed)
+            raise ConversionFailedError(
+                f"Unsupported input format: {suffix}")
+
+        record = self._update_record(
+            record,
+            input_url=path,
+            conversion_type="convert_pdf_to_ppt"
+        )
 
         try:
 
@@ -136,27 +142,19 @@ class Conversion:
             raise FileNotFoundError(
                 f"File not found in storage: {path}") from e
 
-        with tempfile.TemporaryDirectory() as tempdir:
-            tempdir = Path(tempdir)
-
-            suffix = Path(path).suffix.lower()
-
-            if suffix != ".pdf":
-                self._update_status(record, JobStatus.failed)
-                raise ConversionFailedError(
-                    f"Unsupported input format: {suffix}")
-
+        with tempfile.TemporaryDirectory() as tmp:
+            tempdir = Path(tmp)
             input_pdf = tempdir / "input.pdf"
-            output_dir = tempdir
+            output_docx = tempdir
 
             with open(input_pdf, "wb") as f:
                 f.write(file_byte)
 
             output_file = self._libreoffice_converter.convert(
-                input_path=input_pdf, output_dir=output_dir, target_ext='odp')
+                input_path=input_pdf, output_dir=output_docx, target_ext='odp')
 
             output_file = self._libreoffice_converter.convert(
-                input_path=output_file, output_dir=output_dir, target_ext='pptx')
+                input_path=output_file, output_dir=output_docx, target_ext='pptx')
 
             if not output_file.exists():
                 self._update_status(record, JobStatus.failed)
@@ -176,7 +174,7 @@ class Conversion:
                             "x-upsert": "true"
                         },
                     )
-                self._update_output_url(record, output_storage_path)
+                self._update_record(record, output_url=output_storage_path)
                 self._update_status(record, JobStatus.completed)
 
             except Exception as e:
@@ -275,14 +273,18 @@ class Conversion:
         if not record:
             raise Exception("Job not found")
 
-        payload = {
-            "input_url": path,
-            "conversion_type": "convert_pdf_to_docx"
-        }
+        suffix = Path(path).suffix.lower()
+        if suffix != ".pdf":
+            self._update_status(record, JobStatus.failed)
+            raise ConversionFailedError(f"Unsupported input format: {suffix}")
 
-        record = self._update_record(record, **payload)
+        record = self._update_record(
+            record,
+            input_url=path,
+            conversion_type="convert_pdf_to_docx"
+        )
 
-        print(f"[wroker] starting convertion for job id {job_id}")
+        print(f"[worker] starting conversion for job id {job_id}")
 
         try:
 
@@ -295,25 +297,17 @@ class Conversion:
             raise FileNotFoundError(
                 f"File not found in storage: {path}") from e
 
-        with tempfile.TemporaryDirectory() as tempdir:
-            tempdir = Path(tempdir)
-
-            suffix = Path(path).suffix.lower()
-
-            if suffix != ".pdf":
-                self._update_status(record, JobStatus.failed)
-                raise ConversionFailedError(
-                    f"Unsupported input format: {suffix}")
-
+        with tempfile.TemporaryDirectory() as tmp:
+            tempdir = Path(tmp)
             input_pdf = Path(tempdir) / "input.pdf"
-            output_dir = Path(tempdir) / "output.docx"
+            output_docx = Path(tempdir) / "output.docx"
 
             with open(input_pdf, "wb") as f:
                 f.write(file_byte)
 
             try:
                 cv = Converter(str(input_pdf))
-                cv.convert(str(output_dir))
+                cv.convert(str(output_docx))
                 cv.close()
             except Exception as e:
                 self._update_status(record, JobStatus.failed)
@@ -322,7 +316,7 @@ class Conversion:
                 raise ConversionFailedError(
                     f"Conversion failed: {str(e)}") from e
 
-            if not output_dir.exists():
+            if not output_docx.exists():
                 self._update_status(record, JobStatus.failed)
                 raise ConversionFailedError(
                     "Conversion failed: No output file found")
@@ -332,7 +326,7 @@ class Conversion:
 
             try:
 
-                with open(output_dir, "rb") as f:
+                with open(output_docx, "rb") as f:
                     self.supabase_client.storage.from_(settings.SUPABASE_CONVERTED_BUCKET).upload(
                         output_storage_path,
                         f,
@@ -341,8 +335,6 @@ class Conversion:
                             "x-upsert": "true"
                         },
                     )
-                self._update_output_url(record, output_storage_path)
-                self._update_status(record, JobStatus.completed)
 
             except Exception as e:
                 self._update_status(record, JobStatus.failed)
@@ -350,6 +342,8 @@ class Conversion:
                 print(
                     f"[worker] error uploading file for job {job_id}: {str(e)}")
                 raise UploadFailedError(f"Upload failed: {str(e)}") from e
+            self._update_record(record, output_url=output_storage_path)
+            self._update_status(record, JobStatus.completed)
 
         print(f"[worker] upload complete for job {job_id}")
 
