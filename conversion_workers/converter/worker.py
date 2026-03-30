@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import time
 import os
+from fastapi import HTTPException
 from pypdf import PdfWriter, PdfReader
 from pathlib import Path
 from typing import Optional
@@ -272,6 +273,7 @@ class Conversion:
         """
 
         record = self.job_repo.get_by_job_id(job_id)
+        print(record)
         if not record:
             raise Exception("Job not found")
 
@@ -280,7 +282,7 @@ class Conversion:
             "conversion_type": "convert_pdf_to_docx"
         }
 
-        record = self._update_record(record, **payload)
+        self._update_record(record, **payload)
 
         print(f"[wroker] starting convertion for job id {job_id}")
 
@@ -341,8 +343,6 @@ class Conversion:
                             "x-upsert": "true"
                         },
                     )
-                self._update_output_url(record, output_storage_path)
-                self._update_status(record, JobStatus.completed)
 
             except Exception as e:
                 self._update_status(record, JobStatus.failed)
@@ -350,6 +350,15 @@ class Conversion:
                 print(
                     f"[worker] error uploading file for job {job_id}: {str(e)}")
                 raise UploadFailedError(f"Upload failed: {str(e)}") from e
+
+            try:
+                self._update_record(record, output_url=output_storage_path)
+                self._update_status(record, JobStatus.completed)
+                print("DB UPDATED SUCCESS")
+
+            except Exception as e:
+                print("DB ERROR:", str(e))
+                raise
 
         print(f"[worker] upload complete for job {job_id}")
 

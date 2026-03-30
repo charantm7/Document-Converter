@@ -1,8 +1,8 @@
-"""initial migration for docker
+"""init
 
-Revision ID: 78d291e768d8
+Revision ID: 82d0e4b9f27e
 Revises: 
-Create Date: 2026-03-02 13:22:39.795034
+Create Date: 2026-03-30 20:42:19.260535
 
 """
 from typing import Sequence, Union
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = '78d291e768d8'
+revision: str = '82d0e4b9f27e'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -31,6 +31,8 @@ def upgrade() -> None:
     sa.Column('about', sa.String(length=50), nullable=True),
     sa.Column('picture', sa.String(), nullable=True),
     sa.Column('date_of_birth', sa.Date(), nullable=True),
+    sa.Column('role', sa.Enum('user', 'admin', name='role'), nullable=True),
+    sa.Column('plan', sa.Enum('free', 'pro', 'enterprise', name='subscriptionplan'), nullable=True),
     sa.Column('is_email_verified', sa.Boolean(), server_default=sa.text('false'), nullable=True),
     sa.Column('email_verified_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('email_verification_sent_at', sa.DateTime(timezone=True), nullable=True),
@@ -47,6 +49,23 @@ def upgrade() -> None:
     sa.UniqueConstraint('username')
     )
     op.create_index(op.f('ix_users_email'), 'users', ['email'], unique=True)
+    op.create_table('api_key',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('hashed_key', sa.String(length=128), nullable=False),
+    sa.Column('prefix', sa.String(length=12), nullable=False),
+    sa.Column('user_id', sa.UUID(), nullable=False),
+    sa.Column('scopes', sa.ARRAY(sa.String()), nullable=True),
+    sa.Column('expiring_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('name', sa.String(length=100), nullable=True),
+    sa.Column('is_active', sa.Boolean(), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.ForeignKeyConstraint(['user_id'], ['users.id'], ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('hashed_key')
+    )
+    op.create_index(op.f('ix_api_key_prefix'), 'api_key', ['prefix'], unique=False)
+    op.create_index(op.f('ix_api_key_user_id'), 'api_key', ['user_id'], unique=False)
     op.create_table('email_verification_tokens',
     sa.Column('id', sa.UUID(), nullable=False),
     sa.Column('hashed_token', sa.String(), nullable=False),
@@ -58,6 +77,22 @@ def upgrade() -> None:
     sa.UniqueConstraint('id')
     )
     op.create_index(op.f('ix_email_verification_tokens_hashed_token'), 'email_verification_tokens', ['hashed_token'], unique=True)
+    op.create_table('jobs',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('user_id', sa.UUID(), nullable=True),
+    sa.Column('status', sa.Enum('processing', 'completed', 'failed', name='job_status'), nullable=False),
+    sa.Column('conversion_type', sa.Enum('convert_pdf_to_ppt', 'convert_docx_to_pdf', 'convert_pdf_to_docx', 'compress_pdf', 'merge_pdf', name='job_conversion_type'), nullable=True),
+    sa.Column('upload_url', sa.String(), nullable=True),
+    sa.Column('input_url', sa.String(), nullable=True),
+    sa.Column('output_url', sa.String(), nullable=True),
+    sa.Column('dowload_url', sa.String(), nullable=True),
+    sa.Column('retry_count', sa.Integer(), nullable=True),
+    sa.Column('max_retry', sa.Integer(), nullable=True),
+    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.ForeignKeyConstraint(['user_id'], ['users.id'], ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id')
+    )
     op.create_table('password_reset_tokens',
     sa.Column('id', sa.UUID(), nullable=False),
     sa.Column('hashed_token', sa.String(), nullable=False),
@@ -89,8 +124,12 @@ def downgrade() -> None:
     op.drop_table('refresh_token')
     op.drop_index(op.f('ix_password_reset_tokens_hashed_token'), table_name='password_reset_tokens')
     op.drop_table('password_reset_tokens')
+    op.drop_table('jobs')
     op.drop_index(op.f('ix_email_verification_tokens_hashed_token'), table_name='email_verification_tokens')
     op.drop_table('email_verification_tokens')
+    op.drop_index(op.f('ix_api_key_user_id'), table_name='api_key')
+    op.drop_index(op.f('ix_api_key_prefix'), table_name='api_key')
+    op.drop_table('api_key')
     op.drop_index(op.f('ix_users_email'), table_name='users')
     op.drop_table('users')
     # ### end Alembic commands ###

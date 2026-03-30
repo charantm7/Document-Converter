@@ -12,8 +12,6 @@ STRIP_REQUEST_HEADERS = {"host", "content-length",
                          "connection", "transfer-encoding"}
 STRIP_RESPONSE_HEADERS = {"content-length", "connection", "transfer-encoding"}
 
-#
-
 
 def _forward_headers(request: Request) -> dict:
     headers = {

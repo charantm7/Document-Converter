@@ -169,14 +169,20 @@ class JobRepository:
 
     def update_records(self, record, **kwargs):
 
-        for key, value in kwargs.items():
-            setattr(record, key, value)
+        try:
+            for key, value in kwargs.items():
+                setattr(record, key, value)
 
-        self.db.add(record)
-        self.db.commit()
-        self.db.refresh(record)
+            self.db.add(record)
+            self.db.commit()
+            self.db.refresh(record)
 
-        return record
+            return record
+
+        except Exception as e:
+            self.db.rollback()
+            print("DB ERROR:", str(e))
+            raise
 
     @handle_db_error("update_output_url", "Error while updating output_url job record")
     def update_output_url(self, record: Jobs, output_url) -> None:

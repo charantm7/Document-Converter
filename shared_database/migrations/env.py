@@ -5,6 +5,7 @@ from sqlalchemy import pool
 
 from alembic import context
 from shared_database.models import Base
+
 from shared_database.settings import settings
 
 # this is the Alembic Config object, which provides
