@@ -10,7 +10,7 @@ from shared_database.connection import SessionLocal
 MAX_RETRIES = 3
 
 
-async def process_job(data):
+def process_job(data):
     target_format = data["target_format"]
     user_id = data["user_id"]
     job_id = data["job_id"]
@@ -57,7 +57,7 @@ async def start_consumer(connection, channel, retry_exchange, dlx_exchange):
                 try:
                     print(f"[worker] processing {job_id}, retry={retry_count}")
 
-                    await process_job(data)
+                    process_job(data)
 
                     print(f"[worker] finished job {job_id}")
 

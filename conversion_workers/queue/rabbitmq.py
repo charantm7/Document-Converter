@@ -25,7 +25,8 @@ async def init_rabbitmq():
         "main_queue",
         durable=True,
         arguments={
-            "x-dead-letter-exchange": "retry_exchange"
+            "x-dead-letter-exchange": "retry_exchange",
+            "x-dead-letter-routing-key": "retry"
         }
     )
 
@@ -34,7 +35,8 @@ async def init_rabbitmq():
         durable=True,
         arguments={
             "x-message-ttl": 5000,
-            "x-dead-letter-exchange": "main_queue"
+            "x-dead-letter-exchange": "main_exchange",
+            "x-dead-letter-routing-key": "main"
         }
     )
 

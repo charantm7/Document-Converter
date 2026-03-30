@@ -177,7 +177,7 @@ class Conversion:
                             "x-upsert": "true"
                         },
                     )
-                self._update_output_url(record, output_storage_path)
+                self._update_record(record, output_url=output_storage_path)
                 self._update_status(record, JobStatus.completed)
 
             except Exception as e:
