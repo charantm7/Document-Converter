@@ -117,3 +117,4 @@ yarl==1.22.0
 zstandard==0.25.0
 zxcvbn==4.5.0
 slowapi==0.1.9
+pdfservices-sdk==4.2.0

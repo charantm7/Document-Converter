@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     RABBITMQ_URL: str
     QUEUE_NAME: str
 
+    CLIENT_SECRET: str
+    CLIENT_ID: str
+
     model_config = SettingsConfigDict(
         env_file=Path(__file__).resolve().parents[0]/".env",
         env_file_encoding="utf-8",

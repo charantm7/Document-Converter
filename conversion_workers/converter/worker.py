@@ -9,6 +9,15 @@ from typing import Optional
 from supabase import Client
 from pdf2docx import Converter
 
+from adobe.pdfservices.operation.auth.service_principal_credentials import ServicePrincipalCredentials
+from adobe.pdfservices.operation.pdf_services import PDFServices
+from adobe.pdfservices.operation.pdf_services_media_type import PDFServicesMediaType
+from adobe.pdfservices.operation.pdfjobs.jobs.export_pdf_job import ExportPDFJob
+from adobe.pdfservices.operation.pdfjobs.params.export_pdf.export_pdf_params import ExportPDFParams
+from adobe.pdfservices.operation.pdfjobs.params.export_pdf.export_pdf_target_format import ExportPDFTargetFormat
+from adobe.pdfservices.operation.pdfjobs.result.export_pdf_result import ExportPDFResult
+from adobe.pdfservices.operation.exception.exceptions import ServiceApiException, ServiceUsageException
+
 from conversion_workers.settings import settings
 
 from sqlalchemy.orm import Session
@@ -98,6 +107,9 @@ class LibreOfficeConverter:
             "Libreoffice not installed in the system")
 
 
+# class Adobe:
+
+
 class Conversion:
     def __init__(self, supabase: Client, db: Session):
         self.supabase_client = supabase
@@ -145,18 +157,51 @@ class Conversion:
         with tempfile.TemporaryDirectory() as tmp:
             tempdir = Path(tmp)
             input_pdf = tempdir / "input.pdf"
-            output_docx = tempdir
+            output_pptx = tempdir / "output.pptx"
 
             with open(input_pdf, "wb") as f:
                 f.write(file_byte)
 
-            output_file = self._libreoffice_converter.convert(
-                input_path=input_pdf, output_dir=output_docx, target_ext='odp')
+            try:
+                credentials = ServicePrincipalCredentials(
+                    client_id=settings.CLIENT_ID,
+                    client_secret=settings.CLIENT_SECRET
+                )
 
-            output_file = self._libreoffice_converter.convert(
-                input_path=output_file, output_dir=output_docx, target_ext='pptx')
+                pdf_service = PDFServices(credentials=credentials)
 
-            if not output_file.exists():
+                with open(input_pdf, "rb") as f:
+                    input_asset = pdf_service.upload(
+                        input_stream=f,
+                        mime_type=PDFServicesMediaType.PDF
+                    )
+
+                export_params = ExportPDFParams(
+                    target_format=ExportPDFTargetFormat.PPTX
+                )
+
+                export_job = ExportPDFJob(
+                    input_asset=input_asset,
+                    export_pdf_params=export_params
+                )
+
+                location = pdf_service.submit(export_job)
+                response = pdf_service.get_job_result(
+                    location, ExportPDFResult
+                )
+
+                result_asset = response.get_result().get_asset()
+                stream_asset = pdf_service.get_content(result_asset)
+
+                with open(output_pptx, "wb") as f:
+                    f.write(stream_asset.get_input_stream())
+            except (ServiceApiException, ServiceUsageException) as e:
+                self._update_status(record, JobStatus.failed)
+                raise ConversionFailedError(
+                    f"Adobe conversion failed: {str(e)}"
+                ) from e
+
+            if not output_pptx.exists():
                 self._update_status(record, JobStatus.failed)
                 raise ConversionFailedError(
                     "Conversion failed: No output file found")
@@ -165,7 +210,7 @@ class Conversion:
                 "original.pdf", "converted.pptx")
 
             try:
-                with open(output_file, "rb") as f:
+                with open(output_pptx, "rb") as f:
                     self.supabase_client.storage.from_(settings.SUPABASE_CONVERTED_BUCKET).upload(
                         output_storage_path,
                         f,
