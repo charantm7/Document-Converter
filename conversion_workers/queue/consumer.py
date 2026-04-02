@@ -11,23 +11,30 @@ MAX_RETRIES = 3
 
 
 async def process_job(data):
+    source_format = data["source_format"]
     target_format = data["target_format"]
     user_id = data["user_id"]
     job_id = data["job_id"]
     path = data["path"]
     db = SessionLocal()
 
-    if target_format == "docx":
-        Conversion(supabase, db).convert_pdf_to_docx(
-            job_id, path, user_id)
+    pdf_to_formats = ["docx", "pptx"]
+
+    if target_format in pdf_to_formats:
+
+        Conversion(supabase, db).convert_pdf_to_file(
+            job_id=job_id,
+            path=path,
+            target_format=target_format
+        )
 
     elif target_format == "pdf":
-        Conversion(supabase, db).convert_docx_to_pdf(
-            job_id, path, user_id)
-
-    elif target_format == "pptx":
-        Conversion(supabase, db).convert_pdf_to_ppt(
-            job_id, path, user_id)
+        Conversion(supabase, db).convert_file_to_pdf(
+            job_id=job_id,
+            path=path,
+            target_format=target_format,
+            source_format=source_format
+        )
 
     elif target_format == "merge":
         Customization(supabase).merge_pdf(
@@ -38,7 +45,7 @@ async def process_job(data):
             job_id, path, user_id)
 
     else:
-        raise ValueError("Unsupported Formate")
+        raise ValueError("Unsupported Format")
 
 
 async def start_consumer(connection, channel, retry_exchange, dlx_exchange):
@@ -53,6 +60,7 @@ async def start_consumer(connection, channel, retry_exchange, dlx_exchange):
 
                 data = json.loads(message.body)
                 job_id = data["job_id"]
+
                 retry_count = data["retry_count"]
                 try:
                     print(f"[worker] processing {job_id}, retry={retry_count}")

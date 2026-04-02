@@ -7,7 +7,7 @@ from ..settings import settings
 download = APIRouter()
 
 
-_client = httpx.AsyncClient(timeout=10)
+_client = httpx.AsyncClient(timeout=60)
 
 STRIP_REQUEST_HEADERS = {"host", "content-length",
                          "connection", "transfer-encoding"}
@@ -42,11 +42,11 @@ def _forward_response(upstream: httpx.Response) -> dict:
     )
 
 
-@download.api_route("/v1/upload/{path:path}", methods=["GET", "POST"])
+@download.api_route("/v1/download/{path:path}", methods=["GET", "POST"])
 async def proxy_download(path: str, request: Request):
 
     body = None
-    if request.method in ['POST', 'PUT', "PATCH"]:
+    if request.method in ['GET','POST', 'PUT', "PATCH"]:
         body = await request.body()
 
     try:

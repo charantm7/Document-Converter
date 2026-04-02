@@ -87,6 +87,9 @@ services:
     volumes:
       - .:/app
 
+    environment:
+      - RABBITMQ_URL=amqp://rabbitmq:5672
+
   db:
     image: postgres:15
     environment:
@@ -158,3 +161,4 @@ volumes:
 networks:
   observability:
     external: true
+    driver: bridge

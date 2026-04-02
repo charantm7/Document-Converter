@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import time
 import os
+import logging
 from pypdf import PdfWriter, PdfReader
 from pathlib import Path
 from typing import Optional
@@ -13,13 +14,16 @@ from adobe.pdfservices.operation.auth.service_principal_credentials import Servi
 from adobe.pdfservices.operation.pdf_services import PDFServices
 from adobe.pdfservices.operation.pdf_services_media_type import PDFServicesMediaType
 from adobe.pdfservices.operation.pdfjobs.jobs.export_pdf_job import ExportPDFJob
+from adobe.pdfservices.operation.pdfjobs.jobs.create_pdf_job import CreatePDFJob
 from adobe.pdfservices.operation.pdfjobs.params.export_pdf.export_pdf_params import ExportPDFParams
 from adobe.pdfservices.operation.pdfjobs.params.export_pdf.export_pdf_target_format import ExportPDFTargetFormat
 from adobe.pdfservices.operation.pdfjobs.result.export_pdf_result import ExportPDFResult
-from adobe.pdfservices.operation.exception.exceptions import ServiceApiException, ServiceUsageException
+from adobe.pdfservices.operation.pdfjobs.result.create_pdf_result import CreatePDFResult
+from adobe.pdfservices.operation.exception.exceptions import (
+    ServiceApiException, ServiceUsageException, SdkException
+)
 
 from conversion_workers.settings import settings
-
 from sqlalchemy.orm import Session
 from shared_database.repository import JobRepository
 from shared_database.models import JobStatus, Jobs
@@ -34,380 +38,377 @@ from conversion_workers.exception import (
     CompressionFailedError
 )
 
+logger = logging.getLogger(__name__)
 
-class LibreOfficeConverter:
-
-    def __init__(
-        self,
-        soffice_path: Optional[str] = None,
-        timeout_seconds: int = 120,
-    ):
-        self.soffice_path = soffice_path or self._detect_soffice()
-        self.timeout_second = timeout_seconds
-
-    def convert(self, input_path: Path, output_dir: Path, target_ext: str) -> Path:
-
-        cmd = [
-            self.soffice_path,
-            "--headless",
-            "--nologo",
-            "--nofirststartwizard",
-            "--norestore",
-            "--convert-to",
-            target_ext,
-            "--outdir",
-            str(output_dir),
-            str(input_path)
-        ]
-
-        try:
-            result = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=self.timeout_second,
-                check=True,
-            )
-
-        except subprocess.TimeoutExpired as e:
-            raise ConversionTimeoutError(
-                "LibreOffice Conversion timeout error") from e
-
-        except subprocess.CalledProcessError as e:
-            print(
-                f"[DEBUG] CalledProcessError STDERR: {e.stderr.decode(errors='ignore')}")
-            raise ConversionFailedError(
-                e.stderr.decode(errors="ignore")) from e
-
-        expected_output = output_dir / \
-            f"{input_path.stem}.{target_ext.lower()}"
-        if expected_output.exists():
-            return expected_output
-
-        for file in output_dir.iterdir():
-            if file.suffix.lower() == f".{target_ext.lower()}" and file != input_path:
-                return file
-
-        raise ConversionFailedError(
-            f"LibreOffice produced no output.\nSTDERR:\n{result.stderr.decode(errors='ignore')}"
-        )
-
-    def _detect_soffice(self) -> str:
-        candidates = [
-            shutil.which("soffice"),
-            "/usr/bin/soffice",
-            "/usr/local/bin/soffice",
-            "C:\\Program Files\\LibreOffice\\program\\soffice.exe",
-        ]
-
-        for path in candidates:
-            if path and Path(path).exists():
-                return str(path)
-        raise LibreOfficeNotFoundError(
-            "Libreoffice not installed in the system")
-
-
-# class Adobe:
+_MIME_PPTX = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+_MIME_PDF = "application/pdf"
+_MIME_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 
 class Conversion:
     def __init__(self, supabase: Client, db: Session):
         self.supabase_client = supabase
-        self._libreoffice_converter = LibreOfficeConverter()
         self.job_repo = JobRepository(db)
-
-    def convert_pdf_to_ppt(self, job_id: str, path: str, user_id: str):
-        """
-        Docstring for convert_pdf_to_ppt
-
-        :param self: Description
-        :param job_id: Description
-        :type job_id: str
-        :param path: Description
-        :type path: str
-        Converter PDF (supabase) -> PPT -> Supabase
-        """
-
-        record = self.job_repo.get_by_job_id(job_id)
-        if not record:
-            raise Exception("Job not found")
-
-        suffix = Path(path).suffix.lower()
-
-        if suffix != ".pdf":
-            self._update_status(record, JobStatus.failed)
-            raise ConversionFailedError(
-                f"Unsupported input format: {suffix}")
-
-        record = self._update_record(
-            record,
-            input_url=path,
-            conversion_type="convert_pdf_to_ppt"
+        self._adobe_credentials = ServicePrincipalCredentials(
+            client_id=settings.ADOBE_CLIENT_ID,
+            client_secret=settings.ADOBE_CLIENT_SECRET
         )
 
-        try:
+    def convert_pdf_to_pptx(self, job_id: str, path: str) -> None:
+        """
+        Converts PDF -> PPTX
 
-            file_byte = self.supabase_client.storage.from_(
-                settings.SUPABASE_RAW_BUCKET).download(path=path)
-        except Exception as e:
-            self._update_status(record, JobStatus.failed)
-            raise FileNotFoundError(
-                f"File not found in storage: {path}") from e
+        Accepts params:
+        - job_id
+        - path
+
+        Process:
+        - Check job exists in db, with extension and update record
+        - download raw file from supabase using path params
+        - sends it to convert into target format
+        - after conversion uploads to the supbase to converted bucket
+
+        """
+
+        record = self._bootstrap_job(
+            job_id=job_id,
+            path=path,
+            expected_suffix=".pdf",
+            conversion_type="convert_pdf_to_pptx"
+        )
+
+        file_bytes = self._download_raw(record, path, job_id)
 
         with tempfile.TemporaryDirectory() as tmp:
             tempdir = Path(tmp)
             input_pdf = tempdir / "input.pdf"
             output_pptx = tempdir / "output.pptx"
 
-            with open(input_pdf, "wb") as f:
-                f.write(file_byte)
+            input_pdf.write_bytes(file_bytes)
 
-            try:
-                credentials = ServicePrincipalCredentials(
-                    client_id=settings.CLIENT_ID,
-                    client_secret=settings.CLIENT_SECRET
-                )
+            self._adobe_export(
+                record=record,
+                input_path=input_pdf,
+                output_path=output_pptx,
+                target_format=ExportPDFTargetFormat.PPTX,
+                job_id=job_id
+            )
 
-                pdf_service = PDFServices(credentials=credentials)
-
-                with open(input_pdf, "rb") as f:
-                    input_asset = pdf_service.upload(
-                        input_stream=f,
-                        mime_type=PDFServicesMediaType.PDF
-                    )
-
-                export_params = ExportPDFParams(
-                    target_format=ExportPDFTargetFormat.PPTX
-                )
-
-                export_job = ExportPDFJob(
-                    input_asset=input_asset,
-                    export_pdf_params=export_params
-                )
-
-                location = pdf_service.submit(export_job)
-                response = pdf_service.get_job_result(
-                    location, ExportPDFResult
-                )
-
-                result_asset = response.get_result().get_asset()
-                stream_asset = pdf_service.get_content(result_asset)
-
-                with open(output_pptx, "wb") as f:
-                    f.write(stream_asset.get_input_stream())
-            except (ServiceApiException, ServiceUsageException) as e:
-                self._update_status(record, JobStatus.failed)
-                raise ConversionFailedError(
-                    f"Adobe conversion failed: {str(e)}"
-                ) from e
-
-            if not output_pptx.exists():
-                self._update_status(record, JobStatus.failed)
-                raise ConversionFailedError(
-                    "Conversion failed: No output file found")
+            self._assert_output_exists(record, output_pptx)
 
             output_storage_path = path.replace(
                 "original.pdf", "converted.pptx")
+            self._upload_converted(
+                record=record,
+                local_path=output_pptx,
+                storage_path=output_storage_path,
+                mime_type=_MIME_PPTX,
+                job_id=job_id
+            )
 
-            try:
-                with open(output_pptx, "rb") as f:
-                    self.supabase_client.storage.from_(settings.SUPABASE_CONVERTED_BUCKET).upload(
-                        output_storage_path,
-                        f,
-                        {
-                            "content-type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                            "x-upsert": "true"
-                        },
-                    )
-                self._update_record(record, output_url=output_storage_path)
-                self._update_status(record, JobStatus.completed)
+        logger.info("[worker] upload complete for job %s", job_id)
 
-            except Exception as e:
-                self._update_status(record, JobStatus.failed)
-                raise UploadFailedError(f"Upload failed: {str(e)}") from e
-        print(f"[worker] upload complete for job {job_id}")
-
-    def convert_docx_to_pdf(self, job_id: str, path: str, user_id: str):
+    def convert_file_to_pdf(
+        self,
+        job_id: str,
+        path: str,
+        target_format: str,
+        source_format: str
+    ) -> None:
         """
-        Docstring for convert_docx_to_pdf
+        converts PDF -> DOCX
 
-        :param self: Description
-        :param job_id: Description
-        :type job_id: str
-        :param path: Description
-        :type path: str
+        Accepts params:
+        - job_id
+        - path
 
-        Converter DOCX (supabase) -> PDF -> Supabase
+        Process:
+        - 
+
         """
-
-        record = self.job_repo.get_by_job_id(job_id)
-        if not record:
-            raise Exception("Job not found")
-        payload = {
-            "input_url": path,
-            "conversion_type": "convert_docx_to_pdf"
-        }
-
-        record = self._update_record(record, **payload)
-
-        try:
-
-            file_byte = self.supabase_client.storage.from_(
-                settings.SUPABASE_RAW_BUCKET).download(path=path)
-        except Exception as e:
-            self._update_status(record, JobStatus.failed)
-            print(
-                f"[worker] error downloading file for job {job_id}: {str(e)}")
-            raise FileNotFoundError(
-                f"File not found in storage: {path}") from e
-
-        with tempfile.TemporaryDirectory() as tempdir:
-            tempdir = Path(tempdir)
-
-            suffix = Path(path).suffix.lower()
-
-            if suffix != ".docx":
-                self._update_status(record, JobStatus.failed)
-                raise ConversionFailedError(
-                    f"Unsupported input format: {suffix}")
-
-            input_docx = tempdir / 'input.docx'
-            output_dir = tempdir / "output.pdf"
-
-            with open(input_docx, "wb") as f:
-                f.write(file_byte)
-
-            output_file = self._libreoffice_converter.convert(
-                input_path=input_docx, output_dir=output_dir, target_ext='pdf')
-
-            if not output_file.exists():
-                self._update_status(record, JobStatus.failed)
-                raise ConversionFailedError(
-                    "Conversion failed: No output file found")
-            output_storage_path = path.replace(
-                "original.docx", "converted.pdf")
-
-            try:
-                with open(output_file, "rb") as f:
-                    self.supabase_client.storage.from_(settings.SUPABASE_CONVERTED_BUCKET).upload(
-                        output_storage_path,
-                        f,
-                        {
-                            "content-type": "application/pdf",
-                            "x-upsert": "true"
-                        },
-                    )
-                self._update_output_url(record, output_storage_path)
-                self._update_status(record, JobStatus.completed)
-
-            except Exception as e:
-                self._update_status(record, JobStatus.failed)
-                print(
-                    f"[worker] error uploading file for job {job_id}: {str(e)}")
-                raise UploadFailedError(f"Upload failed: {str(e)}") from e
-        print(f"[worker] upload complete for job {job_id}")
-
-    def convert_pdf_to_docx(self, job_id: str, path: str, user_id: str):
-        """
-        Docstring for convert_pdf_to_docx
-
-        PDF (supabase) -> DOX -> Supabase
-        """
-
-        record = self.job_repo.get_by_job_id(job_id)
-        if not record:
-            raise Exception("Job not found")
-
-        suffix = Path(path).suffix.lower()
-        if suffix != ".pdf":
-            self._update_status(record, JobStatus.failed)
-            raise ConversionFailedError(f"Unsupported input format: {suffix}")
-
-        record = self._update_record(
-            record,
-            input_url=path,
-            conversion_type="convert_pdf_to_docx"
+        record = self._bootstrap_job(
+            job_id=job_id,
+            path=path,
+            expected_suffix=f".{source_format}",
+            conversion_type=f"convert_{source_format}_to_{target_format}"
         )
 
-        print(f"[worker] starting conversion for job id {job_id}")
-
-        try:
-
-            file_byte = self.supabase_client.storage.from_(
-                settings.SUPABASE_RAW_BUCKET).download(path=path)
-        except Exception as e:
-            self._update_status(record, JobStatus.failed)
-            print(
-                f"[worker] error downloading file for job {job_id}: {str(e)}")
-            raise FileNotFoundError(
-                f"File not found in storage: {path}") from e
+        file_bytes = self._download_raw(record, path, job_id)
 
         with tempfile.TemporaryDirectory() as tmp:
             tempdir = Path(tmp)
-            input_pdf = Path(tempdir) / "input.pdf"
-            output_docx = Path(tempdir) / "output.docx"
+            input_file = tempdir / f"input.{source_format}"
+            output_pdf = tempdir / "output.pdf"
 
-            with open(input_pdf, "wb") as f:
-                f.write(file_byte)
+            input_file.write_bytes(file_bytes)
 
-            try:
-                cv = Converter(str(input_pdf))
-                cv.convert(str(output_docx))
-                cv.close()
-            except Exception as e:
-                self._update_status(record, JobStatus.failed)
-                print(
-                    f"[worker] error during conversion for job {job_id}: {str(e)}")
-                raise ConversionFailedError(
-                    f"Conversion failed: {str(e)}") from e
-
-            if not output_docx.exists():
-                self._update_status(record, JobStatus.failed)
-                raise ConversionFailedError(
-                    "Conversion failed: No output file found")
+            self._adobe_create_pdf(
+                record=record,
+                input_path=input_file,
+                output_path=output_pdf,
+                job_id=job_id,
+                source_format=source_format
+            )
 
             output_storage_path = path.replace(
-                "original.pdf", "converted.docx")
+                f"original.{source_format}", "converted.pdf")
+            self._upload_converted(
+                record=record,
+                local_path=output_pdf,
+                storage_path=output_storage_path,
+                mime_type=_MIME_PDF,
+                job_id=job_id
+            )
 
-            try:
+        logger.info("[worker] upload complete for job %s", job_id)
 
-                with open(output_docx, "rb") as f:
-                    self.supabase_client.storage.from_(settings.SUPABASE_CONVERTED_BUCKET).upload(
-                        output_storage_path,
-                        f,
-                        {
-                            "content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                            "x-upsert": "true"
-                        },
-                    )
+    def convert_pdf_to_file(self, job_id: str, path: str, target_format: str) -> None:
+        """
+        DOCX (Supabase) → PDF (Adobe PDF Services) → Supabase
 
-            except Exception as e:
-                self._update_status(record, JobStatus.failed)
+        :param job_id: Unique job identifier
+        :param path:   Supabase storage path of the source DOCX
+        :param user_id: Requesting user ID
+        """
 
-                print(
-                    f"[worker] error uploading file for job {job_id}: {str(e)}")
-                raise UploadFailedError(f"Upload failed: {str(e)}") from e
-            self._update_record(record, output_url=output_storage_path)
+        formats, conversion_type = self._ypget_conversion_te_and_format(
+            target_format)
+
+        record = self._bootstrap_job(
+            job_id=job_id,
+            path=path,
+            expected_suffix=".pdf",
+            conversion_type=conversion_type
+        )
+
+        file_bytes = self._download_raw(record, path, job_id)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tempdir = Path(tmp)
+            input_pdf = tempdir / "input.pdf"
+            output_file = tempdir / f"output.{target_format}"
+
+            input_pdf.write_bytes(file_bytes)
+
+            self._adobe_export(
+                record=record,
+                input_path=input_pdf,
+                output_path=output_file,
+                target_format=formats,
+                job_id=job_id
+            )
+
+            output_storage_path = path.replace(
+                "original.pdf", f"converted.{target_format}")
+            self._upload_converted(
+                record=record,
+                local_path=output_file,
+                storage_path=output_storage_path,
+                mime_type=self._get_mime_type(target_format),
+                job_id=job_id
+            )
+
+        logger.info("[worker] upload complete for job %s", job_id)
+
+    """Adobe Helpers"""
+
+    def _adobe_export(
+        self,
+        record: Jobs,
+        input_path: Path,
+        output_path: Path,
+        target_format: ExportPDFTargetFormat,
+        job_id: str
+    ) -> None:
+        """Export a PDF to another format via Adobe PDF Services."""
+        try:
+            pdf_services = PDFServices(credentials=self._adobe_credentials)
+
+            with open(input_path, "rb") as f:
+                input_asset = pdf_services.upload(
+                    input_stream=f,
+                    mime_type=PDFServicesMediaType.PDF
+                )
+
+            export_job = ExportPDFJob(
+                input_asset=input_asset,
+                export_pdf_params=ExportPDFParams(target_format=target_format)
+            )
+
+            location = pdf_services.submit(export_job)
+            response = pdf_services.get_job_result(location, ExportPDFResult)
+
+            stream_asset = pdf_services.get_content(
+                response.get_result().get_asset()
+            )
+            output_path.write_bytes(stream_asset.get_input_stream())
+
+        except (ServiceApiException, ServiceUsageException, SdkException) as e:
+            self._fail(record)
+            logger.error(
+                "[worker] Adobe export failed for job %s: %s", job_id, e)
+            raise ConversionFailedError(f"Adobe export failed: {e}") from e
+
+        self._assert_output_exists(record, output_path)
+
+    def _adobe_create_pdf(
+        self,
+        record: Jobs,
+        input_path: Path,
+        output_path: Path,
+        job_id: str,
+        source_format: str
+    ) -> None:
+        """Create a PDF from a DOCX via Adobe PDF Services."""
+        try:
+            pdf_services = PDFServices(credentials=self._adobe_credentials)
+
+            with open(input_path, "rb") as f:
+                input_asset = pdf_services.upload(
+                    input_stream=f,
+                    mime_type=self._get_adobe_pdf_service_mime_type(
+                        source_format)
+                )
+
+            create_job = CreatePDFJob(input_asset=input_asset)
+
+            location = pdf_services.submit(create_job)
+            response = pdf_services.get_job_result(location, CreatePDFResult)
+
+            stream_asset = pdf_services.get_content(
+                response.get_result().get_asset()
+            )
+            output_path.write_bytes(stream_asset.get_input_stream())
+
+        except (ServiceApiException, ServiceUsageException, SdkException) as e:
+            self._fail(record)
+            logger.error(
+                "[worker] Adobe create PDF failed for job %s: %s", job_id, e)
+            raise ConversionFailedError(f"Adobe create PDF failed: {e}") from e
+
+        self._assert_output_exists(record, output_path)
+
+    """Supabase Helpers"""
+
+    def _download_raw(self, record: Jobs, path: str, job_id: str) -> bytes:
+        """This function downloads the raw file from the supabase storage."""
+        try:
+            return self.supabase_client.storage.from_(
+                settings.SUPABASE_RAW_BUCKET
+            ).download(path=path)
+        except Exception as e:
+            self._fail(record)
+            logger.error("[worker] download failed for job %s: %s", job_id, e)
+            raise FileNotFoundError(
+                f"File not found in storage: {path}") from e
+
+    def _upload_converted(
+        self,
+        record: Jobs,
+        local_path: Path,
+        storage_path: str,
+        mime_type: str,
+        job_id: str
+    ) -> None:
+        """This func upload a converted file to the converted supabase bucket."""
+        try:
+            with open(local_path, "rb") as f:
+                self.supabase_client.storage.from_(
+                    settings.SUPABASE_CONVERTED_BUCKET
+                ).upload(
+                    storage_path,
+                    f,
+                    {"content-type": mime_type, "x-upsert": "true"}
+                )
+            self._update_record(record, output_url=storage_path)
             self._update_status(record, JobStatus.completed)
 
-        print(f"[worker] upload complete for job {job_id}")
+        except Exception as e:
+            self._fail(record)
+            logger.error("[worker] upload failed for job %s: %s", job_id, e)
+            raise UploadFailedError(f"Upload failed: {e}") from e
 
-    def _create_job_record(self, job_id, path, user_id, conversion_type) -> Jobs:
-        payload = {
-            "id": job_id,
-            "input_url": path,
-            "user_id": user_id,
-            "conversion_type": conversion_type,
-            "status": JobStatus.processing
+    """Job record helpers"""
+
+    def _bootstrap_job(
+        self,
+        job_id: str,
+        path: str,
+        expected_suffix: str,
+        conversion_type: str
+    ) -> Jobs:
+        """
+        1) validate the job record exists
+        2) validate file extension,
+        3) update the record with input metadata.
+        """
+        record = self.job_repo.get_by_job_id(job_id)
+        if not record:
+            raise Exception(f"Job not found: {job_id}")
+
+        suffix = Path(path).suffix.lower()
+        if suffix != expected_suffix:
+            self._fail(record)
+            raise ConversionFailedError(f"Unsupported input format: {suffix}")
+
+        return self._update_record(
+            record,
+            input_url=path,
+            conversion_type=conversion_type
+        )
+
+    def _assert_output_exists(self, record: Jobs, path: Path) -> None:
+        """Raise ConversionFailedError if the expected output file is missing."""
+        if not path.exists():
+            self._fail(record)
+            raise ConversionFailedError(
+                "Conversion failed: output file not found")
+
+    def _get_conversion_type_and_format(self, target_format: str):
+        formats = {
+            "docx": ExportPDFTargetFormat.DOCX,
+            "pptx": ExportPDFTargetFormat.PPTX
         }
-        return self.job_repo.create(**payload)
+        return formats.get(target_format), f"convert_pdf_to_{target_format}"
 
-    def _update_status(self, record, status) -> None:
+    def _get_adobe_pdf_service_mime_type(self, source_format: str):
+        formats = {
+            "docx": PDFServicesMediaType.DOCX,
+            "pptx": PDFServicesMediaType.PPTX
+        }
+        return formats.get(source_format)
+
+    def _get_mime_type(self, target_format: str):
+        types = {
+            "docx": _MIME_DOCX,
+            "pdf": _MIME_PDF,
+            "pptx": _MIME_PPTX
+        }
+        return types.get(target_format)
+
+    def _fail(self, record: Jobs) -> None:
+        self._update_status(record, JobStatus.failed)
+
+    def _update_status(self, record: Jobs, status: JobStatus) -> None:
         self.job_repo.update_status(record, status)
-        return None
 
-    def _update_record(self, record, **kw) -> Jobs:
-        return self.job_repo.update_records(record, **kw)
+    def _update_record(self, record: Jobs, **kwargs) -> Jobs:
+        return self.job_repo.update_records(record, **kwargs)
+
+    def _create_job_record(
+        self,
+        job_id: str,
+        path: str,
+        user_id: str,
+        conversion_type: str
+    ) -> Jobs:
+        return self.job_repo.create(
+            id=job_id,
+            input_url=path,
+            user_id=user_id,
+            conversion_type=conversion_type,
+            status=JobStatus.processing
+        )
 
 
 class Compression:

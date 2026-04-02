@@ -87,7 +87,8 @@ async def convert_file(body: ConvertRequest, request: Request):
         "user_id": user_id,
         "job_id": body.job_id,
         "path": body.path,
-        "target_format": body.target_format
+        "target_format": body.target_format,
+        "source_format": body.source_format
     }
 
     await publish_job(message)
