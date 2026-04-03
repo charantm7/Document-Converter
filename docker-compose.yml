@@ -77,18 +77,17 @@ services:
 
     container_name: conversion-service
 
-    depends_on:
-      - db
-      - rabbitmq
-
     networks:
       - observability
 
     volumes:
       - .:/app
 
-    environment:
-      - RABBITMQ_URL=amqp://rabbitmq:5672
+    depends_on:
+      db:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
 
   db:
     image: postgres:15

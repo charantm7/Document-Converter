@@ -45,68 +45,45 @@ _MIME_PDF = "application/pdf"
 _MIME_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 
+class JobRecordHelper:
+
+    def __init__(self, db: Session):
+        self.job_repo = JobRepository(db)
+
+    def fail(self, record: Jobs) -> None:
+        self.update_status(record, JobStatus.failed)
+
+    def update_status(self, record: Jobs, status: JobStatus) -> None:
+        self.job_repo.update_status(record, status)
+
+    def update_record(self, record: Jobs, **kwargs) -> Jobs:
+        return self.job_repo.update_records(record, **kwargs)
+
+    def create_job_record(
+        self,
+        job_id: str,
+        path: str,
+        user_id: str,
+        conversion_type: str
+    ) -> Jobs:
+        return self.job_repo.create(
+            id=job_id,
+            input_url=path,
+            user_id=user_id,
+            conversion_type=conversion_type,
+            status=JobStatus.processing
+        )
+
+
 class Conversion:
     def __init__(self, supabase: Client, db: Session):
+        self.db = db
         self.supabase_client = supabase
         self.job_repo = JobRepository(db)
         self._adobe_credentials = ServicePrincipalCredentials(
-            client_id=settings.ADOBE_CLIENT_ID,
-            client_secret=settings.ADOBE_CLIENT_SECRET
+            client_id=settings.CLIENT_ID,
+            client_secret=settings.CLIENT_SECRET
         )
-
-    def convert_pdf_to_pptx(self, job_id: str, path: str) -> None:
-        """
-        Converts PDF -> PPTX
-
-        Accepts params:
-        - job_id
-        - path
-
-        Process:
-        - Check job exists in db, with extension and update record
-        - download raw file from supabase using path params
-        - sends it to convert into target format
-        - after conversion uploads to the supbase to converted bucket
-
-        """
-
-        record = self._bootstrap_job(
-            job_id=job_id,
-            path=path,
-            expected_suffix=".pdf",
-            conversion_type="convert_pdf_to_pptx"
-        )
-
-        file_bytes = self._download_raw(record, path, job_id)
-
-        with tempfile.TemporaryDirectory() as tmp:
-            tempdir = Path(tmp)
-            input_pdf = tempdir / "input.pdf"
-            output_pptx = tempdir / "output.pptx"
-
-            input_pdf.write_bytes(file_bytes)
-
-            self._adobe_export(
-                record=record,
-                input_path=input_pdf,
-                output_path=output_pptx,
-                target_format=ExportPDFTargetFormat.PPTX,
-                job_id=job_id
-            )
-
-            self._assert_output_exists(record, output_pptx)
-
-            output_storage_path = path.replace(
-                "original.pdf", "converted.pptx")
-            self._upload_converted(
-                record=record,
-                local_path=output_pptx,
-                storage_path=output_storage_path,
-                mime_type=_MIME_PPTX,
-                job_id=job_id
-            )
-
-        logger.info("[worker] upload complete for job %s", job_id)
 
     def convert_file_to_pdf(
         self,
@@ -171,7 +148,7 @@ class Conversion:
         :param user_id: Requesting user ID
         """
 
-        formats, conversion_type = self._ypget_conversion_te_and_format(
+        formats, conversion_type = self._get_conversion_type_and_format(
             target_format)
 
         record = self._bootstrap_job(
@@ -244,7 +221,7 @@ class Conversion:
             output_path.write_bytes(stream_asset.get_input_stream())
 
         except (ServiceApiException, ServiceUsageException, SdkException) as e:
-            self._fail(record)
+            JobRecordHelper(self.db).fail(record)
             logger.error(
                 "[worker] Adobe export failed for job %s: %s", job_id, e)
             raise ConversionFailedError(f"Adobe export failed: {e}") from e
@@ -281,7 +258,7 @@ class Conversion:
             output_path.write_bytes(stream_asset.get_input_stream())
 
         except (ServiceApiException, ServiceUsageException, SdkException) as e:
-            self._fail(record)
+            JobRecordHelper(self.db).fail(record)
             logger.error(
                 "[worker] Adobe create PDF failed for job %s: %s", job_id, e)
             raise ConversionFailedError(f"Adobe create PDF failed: {e}") from e
@@ -297,7 +274,7 @@ class Conversion:
                 settings.SUPABASE_RAW_BUCKET
             ).download(path=path)
         except Exception as e:
-            self._fail(record)
+            JobRecordHelper(self.db).fail(record)
             logger.error("[worker] download failed for job %s: %s", job_id, e)
             raise FileNotFoundError(
                 f"File not found in storage: {path}") from e
@@ -320,11 +297,13 @@ class Conversion:
                     f,
                     {"content-type": mime_type, "x-upsert": "true"}
                 )
-            self._update_record(record, output_url=storage_path)
-            self._update_status(record, JobStatus.completed)
+            JobRecordHelper(self.db).update_record(
+                record, output_url=storage_path)
+            JobRecordHelper(self.db).update_status(
+                record, JobStatus.completed)
 
         except Exception as e:
-            self._fail(record)
+            JobRecordHelper(self.db).fail(record)
             logger.error("[worker] upload failed for job %s: %s", job_id, e)
             raise UploadFailedError(f"Upload failed: {e}") from e
 
@@ -348,10 +327,10 @@ class Conversion:
 
         suffix = Path(path).suffix.lower()
         if suffix != expected_suffix:
-            self._fail(record)
+            JobRecordHelper(self.db).fail(record)
             raise ConversionFailedError(f"Unsupported input format: {suffix}")
 
-        return self._update_record(
+        return JobRecordHelper(self.db).update_record(
             record,
             input_url=path,
             conversion_type=conversion_type
@@ -360,7 +339,7 @@ class Conversion:
     def _assert_output_exists(self, record: Jobs, path: Path) -> None:
         """Raise ConversionFailedError if the expected output file is missing."""
         if not path.exists():
-            self._fail(record)
+            JobRecordHelper(self.db).fail(record)
             raise ConversionFailedError(
                 "Conversion failed: output file not found")
 
@@ -386,34 +365,12 @@ class Conversion:
         }
         return types.get(target_format)
 
-    def _fail(self, record: Jobs) -> None:
-        self._update_status(record, JobStatus.failed)
-
-    def _update_status(self, record: Jobs, status: JobStatus) -> None:
-        self.job_repo.update_status(record, status)
-
-    def _update_record(self, record: Jobs, **kwargs) -> Jobs:
-        return self.job_repo.update_records(record, **kwargs)
-
-    def _create_job_record(
-        self,
-        job_id: str,
-        path: str,
-        user_id: str,
-        conversion_type: str
-    ) -> Jobs:
-        return self.job_repo.create(
-            id=job_id,
-            input_url=path,
-            user_id=user_id,
-            conversion_type=conversion_type,
-            status=JobStatus.processing
-        )
-
 
 class Compression:
-    def __init__(self, supabase: Client):
+    def __init__(self, supabase: Client, db: Session):
+        self.record_helper = JobRecordHelper(db)
         self.supabase_client = supabase
+        self.job_repo = JobRepository(db)
 
     def compress_pdf(self, job_id: str, path: str, quality: str = "ebook", pdf_bytes: Optional[bytes] = None):
         """
@@ -424,11 +381,19 @@ class Compression:
 
         print(f"[wroker] starting compression for job id {job_id}")
 
+        record = self._bootstrap_job(
+            job_id=job_id,
+            path=path,
+            expected_suffix=".pdf",
+            conversion_type="compress_pdf"
+        )
+
         try:
 
             file_byte = self.supabase_client.storage.from_(
                 settings.SUPABASE_RAW_BUCKET).download(path=path)
         except Exception as e:
+            self.record_helper.fail(record)
             print(
                 f"[worker] error downloading file for job {job_id}: {str(e)}")
             raise FileNotFoundError(
@@ -436,12 +401,6 @@ class Compression:
 
         with tempfile.TemporaryDirectory() as tempdir:
             tempdir = Path(tempdir)
-
-            suffix = Path(path).suffix.lower()
-
-            if suffix != ".pdf":
-                raise ConversionFailedError(
-                    f"Unsupported input format: {suffix}")
 
             input_pdf = Path(tempdir) / "input.pdf"
             output_pdf = Path(tempdir) / "compressed.pdf"
@@ -465,12 +424,14 @@ class Compression:
                 stderr=subprocess.PIPE,
             )
             if result.returncode != 0:
+                self.record_helper.fail(record)
                 print(
                     f"[worker] error during compression for job {job_id}: {result.stderr.decode(errors='ignore')}")
                 raise CompressionFailedError(
                     f"Compression failed: {result.stderr.decode(errors='ignore')}")
 
             if not output_pdf.exists():
+                self.record_helper.fail(record)
                 raise CompressionFailedError(
                     "Compression failed: No output file found")
 
@@ -488,17 +449,53 @@ class Compression:
                             "x-upsert": "true"
                         },
                     )
+                    self.record_helper.update_record(
+                        record, output_url=output_storage_path)
+                    self.record_helper.update_status(
+                        record, JobStatus.completed)
             except Exception as e:
+                self.record_helper.fail(record)
+
                 print(
                     f"[worker] error uploading file for job {job_id}: {str(e)}")
                 raise UploadFailedError(f"Upload failed: {str(e)}") from e
 
         print(f"[worker] upload complete for job {job_id}")
 
+    def _bootstrap_job(
+        self,
+        job_id: str,
+        path: str,
+        expected_suffix: str,
+        conversion_type: str
+    ) -> Jobs:
+        """
+        1) validate the job record exists
+        2) validate file extension,
+        3) update the record with input metadata.
+        """
+        record = self.job_repo.get_by_job_id(job_id)
+        if not record:
+            raise Exception(f"Job not found: {job_id}")
+
+        suffix = Path(path).suffix.lower()
+        if suffix != expected_suffix:
+            self.record_helper.fail(record)
+            raise ConversionFailedError(
+                f"Unsupported input format: {suffix}")
+
+        return self.record_helper.update_record(
+            record,
+            input_url=path,
+            conversion_type=conversion_type
+        )
+
 
 class Customization:
-    def __init__(self, supabase: Client):
+    def __init__(self, supabase: Client, db: Session):
+        self.record_helper = JobRecordHelper(db)
         self.supabase_client = supabase
+        self.job_repo = JobRepository(db)
 
     def merge_pdf(self, job_id: str, path: list[str]):
         """
@@ -507,9 +504,16 @@ class Customization:
         PDF (supabase) -> Merged PDF -> Supabase
         """
 
-        file_bytes_list = self._download_pdf(job_id, path)
+        record = self._bootstrap_job(
+            job_id=job_id,
+            path=path,
+            expected_suffix=".pdf",
+            conversion_type="merge_pdf"
+        )
 
-        output_pdf_bytes = self._merge_pdfs(file_bytes_list)
+        file_bytes_list = self._download_pdf(job_id, path, record)
+
+        output_pdf_bytes = self._merge_pdfs(file_bytes_list, record)
         output_storage_path = str(Path(path[0]).with_name('merged.pdf'))
         try:
             self.supabase_client.storage.from_(settings.SUPABASE_CONVERTED_BUCKET).upload(
@@ -520,14 +524,21 @@ class Customization:
                     "x-upsert": "true"
                 },
             )
+            self.record_helper.update_record(
+                record, output_url=output_storage_path)
+            self.record_helper.update_status(
+                record, JobStatus.completed)
         except Exception as e:
+            self.record_helper.fail(record)
             print(f"[worker] error uploading file for job {job_id}: {str(e)}")
             raise UploadFailedError(f"Upload failed: {str(e)}") from e
+
         print(f"[worker] upload complete for job {job_id}")
 
-    def _merge_pdfs(self, pdf_bytes_list: list[bytes]):
+    def _merge_pdfs(self, pdf_bytes_list: list[bytes], record):
 
         if len(pdf_bytes_list) < 2:
+            self.record_helper.fail(record)
             raise ValueError(
                 "At least two PDF files are required for merging.")
 
@@ -548,12 +559,14 @@ class Customization:
             merger.close()
 
             if not output_pdf_path.exists():
+                self.record_helper.fail(record)
+
                 raise ConversionFailedError(
                     "Merging failed: No output file found")
 
             return output_pdf_path.read_bytes()
 
-    def _download_pdf(self, job_id: str, path: list[str]) -> list[bytes]:
+    def _download_pdf(self, job_id: str, path: list[str], record) -> list[bytes]:
         """
         Docstring for download_pdf
 
@@ -567,8 +580,39 @@ class Customization:
                     settings.SUPABASE_RAW_BUCKET).download(path=p)
                 pdf_bytes.append(file_byte)
             except Exception as e:
+                self.record_helper.fail(record)
+
                 print(
                     f"[worker] error downloading file for job {job_id}: {str(e)}")
                 raise FileNotFoundError(
                     f"File not found in storage: {p}") from e
         return pdf_bytes
+
+    def _bootstrap_job(
+        self,
+        job_id: str,
+        path: list[str],
+        expected_suffix: str,
+        conversion_type: str
+    ) -> Jobs:
+        """
+        1) validate the job record exists
+        2) validate file extension,
+        3) update the record with input metadata.
+        """
+        record = self.job_repo.get_by_job_id(job_id)
+        if not record:
+            raise Exception(f"Job not found: {job_id}")
+
+        for p in path:
+            suffix = Path(p).suffix.lower()
+            if suffix != expected_suffix:
+                self.record_helper.fail(record)
+                raise ConversionFailedError(
+                    f"Unsupported input format: {suffix}")
+
+        return self.record_helper.update_record(
+            record,
+            input_url=path,
+            conversion_type=conversion_type
+        )

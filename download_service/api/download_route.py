@@ -18,8 +18,8 @@ class DownloadSchema(BaseModel):
 @downloader.get("/download")
 async def get_downloadable_link(data: DownloadSchema, db: Session = Depends(get_db)):
 
-    conversion = ["convert_pdf_to_ppt",
-                  "convert_docx_to_pdf", "convert_pdf_to_docx", "merge_pdf"]
+    conversion = ["convert_pdf_to_pptx",
+                  "convert_docx_to_pdf", "convert_pdf_to_docx", "merge_pdf", "convert_pptx_to_pdf"]
 
     repo = JobRepository(db)
     record = repo.get_by_job_id(data.job_id)

@@ -1,9 +1,10 @@
 import json
 import aio_pika
+from uuid import uuid4
 from fastapi import APIRouter, HTTPException, Header, status, Request, Depends
 from sqlalchemy.orm import Session
 
-from upload_service.src.api.v1.upload_route.schema import PreSignedSchema, ConvertRequest, MergeRequest
+from upload_service.src.api.v1.upload_route.schema import PreSignedSchema, ConvertRequest, MergeRequest, CompressRequest
 from upload_service.src.api.v1.upload_route.service import build_storage_path
 from upload_service.src.config.rabbitmq_connection import get_rabbit_connection
 from upload_service.src.queue.producer import publish_job
@@ -65,11 +66,36 @@ async def generate_presigned_url(
 
 
 @upload_service.post("/merge/start")
-async def merge_files(body: MergeRequest):
+async def merge_files(body: MergeRequest, user_id: str = Header(..., alias="User-Id"), db: Session = Depends(get_db)):
+
+    job_id = str(uuid4())
+    repo = JobRepository(db)
+
+    repo.create(
+        id=job_id,
+        user_id=user_id,
+        status=JobStatus.processing,
+    )
+
+    message = {
+        "job_id": job_id,
+        "path": body.path,
+        "user_id": user_id,
+        "target_format": body.target_format
+    }
+
+    await publish_job(message)
+
+    return {"message": "Merge job queued", "job_id": job_id}
+
+
+@upload_service.post("/compress/start")
+async def compress_files(body: CompressRequest, user_id: str = Header(..., alias="User-Id")):
 
     message = {
         "job_id": body.job_id,
         "path": body.path,
+        "user_id": user_id,
         "target_format": body.target_format
     }
 

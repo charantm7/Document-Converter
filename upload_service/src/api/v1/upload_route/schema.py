@@ -8,7 +8,6 @@ class PreSignedSchema(BaseModel):
 
 
 class MergeRequest(BaseModel):
-    job_id: str
     path: List[str] = Field(..., min_items=2,
                             description="List of file paths to be merged")
     target_format: str = Field(
@@ -25,6 +24,26 @@ class MergeRequest(BaseModel):
         for path in value:
             if not path.lower().endswith(".pdf"):
                 raise ValueError("All files must be in PDF format for merging")
+        return value
+
+
+class CompressRequest(BaseModel):
+    job_id: str
+    path: str
+    target_format: str = Field(
+        "compress", description="Target format for compress, should be 'compress'")
+
+    @field_validator("target_format")
+    def validate_target_format(cls, value):
+        if value != "compress":
+            raise ValueError("target_format must be 'compress'")
+        return value
+
+    @field_validator("path")
+    def validate_paths(cls, value):
+
+        if not value.lower().endswith(".pdf"):
+            raise ValueError("All files must be in PDF format for compress")
         return value
 
 

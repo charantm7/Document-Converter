@@ -1,20 +1,11 @@
-from conversion_workers.queue.connection import get_rabbitmq_connection
-
-
-connection = None
-channel = None
-
-
-main_exchange = None
-retry_exchange = None
-dlx_exchange = None
+from conversion_workers.queue.connection import get_rabbit_connection
 
 
 async def init_rabbitmq():
     global connection, channel
     global main_exchange, retry_exchange, dlx_exchange
 
-    connection = await get_rabbitmq_connection()
+    connection = await get_rabbit_connection()
     channel = await connection.channel()
 
     main_exchange = await channel.declare_exchange("main_exchange", durable=True)
@@ -34,7 +25,7 @@ async def init_rabbitmq():
         durable=True,
         arguments={
             "x-message-ttl": 5000,
-            "x-dead-letter-exchange": "main_queue"
+            "x-dead-letter-exchange": "main_exchange"
         }
     )
 
@@ -47,5 +38,4 @@ async def init_rabbitmq():
     await retry_queue.bind(retry_exchange, routing_key="retry")
     await dead_queue.bind(dlx_exchange, routing_key="dead")
 
-    print(f"[RabbitMQ] ready")
-    return connection, channel, retry_exchange, dlx_exchange
+    return main_queue, retry_exchange, dlx_exchange

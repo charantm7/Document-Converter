@@ -27,9 +27,10 @@ class JobStatus(str, enum.Enum):
 
 class ConversionType(str, enum.Enum):
 
-    convert_pdf_to_ppt = "convert_pdf_to_ppt"
+    convert_pdf_to_pptx = "convert_pdf_to_pptx"
     convert_docx_to_pdf = "convert_docx_to_pdf"
     convert_pdf_to_docx = "convert_pdf_to_docx"
+    convert_pptx_to_pdf = "convert_pptx_to_pdf"
     compress_pdf = "compress_pdf"
     merge_pdf = "merge_pdf"
 
